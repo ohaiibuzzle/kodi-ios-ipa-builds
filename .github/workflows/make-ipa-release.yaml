@@ -6,6 +6,8 @@ on:
                 description: "Kodi version to build (e.g. 19.4)"
                 required: true
                 default: "21.3"
+    schedule:
+        - cron: '0 0 * * 0' # Every Sunday at midnight
 
 jobs:
     build:
@@ -13,14 +15,51 @@ jobs:
         permissions:
             contents: write
         steps:
+            - name: Checkout repository
+              uses: actions/checkout@v3
+            - name: Install libplist-utils
+              run: sudo apt-get update && sudo apt-get install -y libplist-utils
+            - name: Load IPA from cache
+              id: load_cache
+              uses: actions/cache@v5
+              with:
+                path: kodi.ipa
+                key: kodi-ipa-${{ github.event.inputs.version }}
+
             - name: Fetch deb package from remote
+              if: steps.load_cache.outputs.cache-hit != 'true'
               run: |
                   VERSION=${{ github.event.inputs.version }}
                   curl -L -o kodi.ipa https://mirrors.kodi.tv/releases/darwin/ios-arm64/org.xbmc.kodi-ios_${VERSION}_iphoneos-arm64.deb
+            - name: Save IPA to cache
+              if: steps.load_cache.outputs.cache-hit != 'true'
+              uses: actions/cache@v5
+              with:
+                path: kodi.ipa
+                key: kodi-ipa-${{ github.event.inputs.version }}
             - name: Extract app bundle from deb
               run: |
                 mkdir -p extract
                 dpkg-deb -x kodi.ipa extract
+            - name: Extract app info (for source json)
+              id: extract_info
+              run: |
+                INFO_PLIST_JSON=$(plistutil -i extract/Applications/Kodi.app/Info.plist -f json)
+                APP_VERSION_STRING=$(echo "$INFO_PLIST_JSON" | jq -r '.CFBundleShortVersionString')
+                APP_BUILD_NUMBER=$(echo "$INFO_PLIST_JSON" | jq -r '.CFBundleVersion')
+                APP_SIZE_IN_BYTES=$(du -sb extract/Applications/Kodi.app | cut -f1)
+                APP_BUILD_DATE=$(date -r extract/Applications/Kodi.app +%Y-%m-%dT%H:%M:%SZ)
+
+                # Load existing source.json template
+                SOURCE_JSON_TEMPLATE=$(cat source.json.template)
+                # Replace placeholders with actual values
+                SOURCE_JSON=$(echo "$SOURCE_JSON_TEMPLATE" | \
+                sed "s/%APP_VERSION_STRING%/$APP_VERSION_STRING/g" | \
+                sed "s/%APP_BUILD_NUMBER%/$APP_BUILD_NUMBER/g" | \
+                sed "s/%APP_SIZE_IN_BYTES%/$APP_SIZE_IN_BYTES/g" | \
+                sed "s/%APP_BUILD_DATE%/$APP_BUILD_DATE/g")
+                # Save the updated source.json
+                echo "$SOURCE_JSON" > source.json
             - name: Package app bundle to iOS IPA
               run: |
                 mkdir Payload
@@ -35,6 +74,6 @@ jobs:
                 tag: v${{ github.event.inputs.version }}-${{ github.run_id }}
                 name: Kodi iOS ${{ github.event.inputs.version }}-${{ github.run_id }}
                 body: "Kodi iOS ${{ github.event.inputs.version }} release created from Kodi.tv deb package."
-                artifacts: Kodi-iOS.ipa
+                artifacts: "Kodi-iOS.ipa,source.json"
                 makeLatest: true
                 skipIfReleaseExists: true
