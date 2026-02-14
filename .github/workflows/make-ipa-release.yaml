@@ -6,6 +6,8 @@ on:
                 description: "Kodi version to build (e.g. 19.4)"
                 required: true
                 default: "21.3"
+    schedule:
+        - cron: '0 0 * * 0' # Every Sunday at midnight
 
 jobs:
     build:
@@ -13,6 +15,10 @@ jobs:
         permissions:
             contents: write
         steps:
+            - name: Checkout repository
+              uses: actions/checkout@v3
+            - name: Install libplist-utils
+              run: sudo apt-get update && sudo apt-get install -y libplist-utils
             - name: Fetch deb package from remote
               run: |
                   VERSION=${{ github.event.inputs.version }}
@@ -21,6 +27,21 @@ jobs:
               run: |
                 mkdir -p extract
                 dpkg-deb -x kodi.ipa extract
+            - name: Extract app info (for source json)
+              id: extract_info
+              run: |
+                INFO_PLIST_JSON=$(plistutil -i extract/Applications/Kodi.app/Info.plist -f json)
+                APP_VERSION_STRING=$(echo "$INFO_PLIST_JSON" | jq -r '.CFBundleShortVersionString')
+                APP_BUILD_NUMBER=$(echo "$INFO_PLIST_JSON" | jq -r '.CFBundleVersion')
+
+                # Load existing source.json template
+                SOURCE_JSON_TEMPLATE=$(cat source.json.template)
+                # Replace placeholders with actual values
+                SOURCE_JSON=$(echo "$SOURCE_JSON_TEMPLATE" | \
+                sed "s/%APP_VERSION_STRING%/$APP_VERSION_STRING/g" | \
+                sed "s/%APP_BUILD_NUMBER%/$APP_BUILD_NUMBER/g")
+                # Save the updated source.json
+                echo "$SOURCE_JSON" > source.json
             - name: Package app bundle to iOS IPA
               run: |
                 mkdir Payload
@@ -35,6 +56,6 @@ jobs:
                 tag: v${{ github.event.inputs.version }}-${{ github.run_id }}
                 name: Kodi iOS ${{ github.event.inputs.version }}-${{ github.run_id }}
                 body: "Kodi iOS ${{ github.event.inputs.version }} release created from Kodi.tv deb package."
-                artifacts: Kodi-iOS.ipa
+                artifacts: "Kodi-iOS.ipa,source.json"
                 makeLatest: true
                 skipIfReleaseExists: true
